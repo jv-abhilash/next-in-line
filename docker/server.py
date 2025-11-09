@@ -62,7 +62,7 @@ def _load_direct():
     # Setup 4-bit quantization config (only if CUDA available)
     quantization_config = None
     device_map = "cpu"
-    torch_dtype = torch.float32
+    dtype = torch.float32
 
     if torch.cuda.is_available():
         try:
@@ -73,12 +73,12 @@ def _load_direct():
                 bnb_4bit_quant_type="nf4"
             )
             device_map = "cuda:0"
-            torch_dtype = torch.float16
+            dtype = torch.float16
             logger.info("✓ 4-bit quantization config created for CUDA")
         except Exception as e:
             logger.warning(f"bitsandbytes unavailable, falling back to full precision on GPU: {e}")
             device_map = "cuda:0"
-            torch_dtype = torch.float16
+            dtype = torch.float16
 
     try:
         logger.info("Step 1/2: Loading tokenizer...")
@@ -99,7 +99,7 @@ def _load_direct():
             trust_remote_code=True,
             quantization_config=quantization_config,
             device_map=device_map,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
             low_cpu_mem_usage=True
         )
 
@@ -156,10 +156,32 @@ async def _generate_with_vllm(prompt):
             logger.error(f"vLLM API error: {response.text}")
             raise Exception(f"vLLM API error: {response.status_code}")
 
-def _generate_direct(prompt, max_new_tokens=200):
-    """Generate text directly using the loaded model"""
+def _generate_direct(messages, max_new_tokens=1024):
+    """Generate text directly using the loaded model with proper chat formatting"""
     if _tok is None or _model is None:
         raise RuntimeError("Model not loaded! Call _load_direct() first")
+
+    # Apply chat template if available (Qwen models have this)
+    if hasattr(_tok, 'apply_chat_template') and _tok.chat_template is not None:
+        # Format messages using the model's chat template
+        prompt = _tok.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+    else:
+        # Fallback: simple formatting
+        prompt = ""
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "system":
+                prompt += f"System: {content}\n"
+            elif role == "user":
+                prompt += f"User: {content}\n"
+            elif role == "assistant":
+                prompt += f"Assistant: {content}\n"
+        prompt += "Assistant: "
 
     inputs = _tok(prompt, return_tensors="pt").to(_model.device)
 
@@ -170,13 +192,13 @@ def _generate_direct(prompt, max_new_tokens=200):
         outputs = _model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            temperature=0.1,  # Low but not zero to allow some variation
+            temperature=0.7,  # Balanced temperature
             do_sample=True,   # Enable sampling
             top_p=0.9,        # Nucleus sampling
             pad_token_id=pad_token_id,
             eos_token_id=_tok.eos_token_id
         )
-    
+
     # Decode and return only the NEW tokens (not the input)
     full_output = _tok.decode(outputs[0], skip_special_tokens=True)
     # Remove the input prompt from the output
@@ -215,8 +237,11 @@ def _classify_with_llm(stem: str, options: List[str]) -> Optional[Dict[str, Any]
         logger.info("Model not loaded yet, loading now for classification...")
         _load_direct()
 
-    # Simple, direct prompt - no chat format
-    prompt = f"""Task: Classify this math question into ONE category and return a JSON object.
+    # Create messages for chat-based classification
+    messages = [
+        {
+            "role": "user",
+            "content": f"""Task: Classify this math question into ONE category and return a JSON object.
 
 Question: {stem}
 
@@ -234,10 +259,12 @@ Instructions: Output ONLY a valid JSON object with these exact fields. No other 
 
 Output (JSON only):
 {{"""
+        }
+    ]
 
     try:
         # Generate response - the {{ will help the model start generating JSON
-        response = _generate_direct(prompt, max_new_tokens=150)
+        response = _generate_direct(messages, max_new_tokens=150)
         
         logger.info(f"Raw LLM output: {response[:300]}")
 
@@ -469,7 +496,9 @@ async def ask(question: Dict[str, Any]):
             if _model is None:
                 _load_direct()
 
-            response = _generate_direct(content, max_new_tokens=200)
+            # Format as chat messages
+            messages = [{"role": "user", "content": content}]
+            response = _generate_direct(messages, max_new_tokens=1024)
 
         return {
             "answer": response,
@@ -479,6 +508,90 @@ async def ask(question: Dict[str, Any]):
 
     except Exception as e:
         logger.error(f"Error in /ask: {str(e)}")
+        return {"error": str(e)}
+
+@app.get("/v1/models")
+async def list_models():
+    """OpenAI-compatible models endpoint"""
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": MODEL_ID,
+                "object": "model",
+                "created": 1677610602,
+                "owned_by": "custom",
+                "permission": [],
+                "root": MODEL_ID,
+                "parent": None
+            }
+        ]
+    }
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Dict[str, Any]):
+    """OpenAI-compatible chat completions endpoint"""
+    try:
+        messages = request.get("messages", [])
+        max_tokens = request.get("max_tokens", 1024)  # Increased from 200 to 1024
+
+        if not messages:
+            return {"error": "No messages provided"}
+
+        # Calculate approximate prompt tokens from all messages
+        prompt_text = " ".join([msg.get("content", "") for msg in messages])
+        prompt_tokens = len(prompt_text.split())
+
+        # Generate response
+        if USE_VLLM:
+            try:
+                # For vLLM, extract the last user message
+                user_message = ""
+                for msg in reversed(messages):
+                    if msg.get("role") == "user":
+                        user_message = msg.get("content", "")
+                        break
+                response_text = await _generate_with_vllm(user_message)
+            except Exception as e:
+                return {"error": f"vLLM error: {str(e)}"}
+        else:
+            # Lazy load model
+            if _model is None:
+                _load_direct()
+
+            # Pass full message history to _generate_direct
+            response_text = _generate_direct(messages, max_new_tokens=max_tokens)
+
+        # Calculate completion tokens
+        completion_tokens = len(response_text.split())
+
+        # Return OpenAI-compatible response
+        return {
+            "id": "chatcmpl-123",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": MODEL_ID,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": response_text
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error in /v1/chat/completions: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return {"error": str(e)}
 
 @app.on_event("shutdown")

@@ -1,11 +1,9 @@
-version: "3.9"
-
 services:
   llm-router:
-    container_name: llm-router
+    container_name: llm-recommender
     build:
       context: .
-      # These map to the ARGs in your Dockerfile.
+      # These map to the ARGs in your Dockerfile
       args:
         BASE_IMAGE: ${BASE_IMAGE}
         EXTRA_PY_PKGS: ${EXTRA_PY_PKGS}
@@ -13,20 +11,37 @@ services:
     env_file:
       - .env
     ports:
+      # Expose the FastAPI server on host PORT (default 7000)
       - "${PORT:-7000}:7000"
-    # GPU access (works on recent Docker + Compose)
+    # If you need GPU access and your Docker supports it, uncomment:
     gpus: all
-    # If your Compose doesn't support `gpus: all`, comment the line above and
-    # uncomment the block below instead:
-    # device_requests:
-    #   - driver: nvidia
-    #     count: all
-    #     capabilities: ["gpu"]
     volumes:
       # Hugging Face cache (host -> container)
       - ./.cache/hf:/app/.cache/hf
-      # If you want pure local-only mode, also mount your model and set
-      # LOCAL_MODEL_DIR=/models/qwen in .env
+      # Optional: mount a local model dir if you use LOCAL_MODEL_DIR in .env
       # - /ABS/PATH/TO/Qwen2.5-Math-7B-Instruct:/models/qwen:ro
-    # Optional: always restart if it stops (good for servers)
     restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    ports:
+      - "3000:8080"              # Open WebUI at http://localhost:3000
+    environment:
+      # Point Open WebUI at your LLM container.
+      # Right now your server.py is NOT OpenAI-compatible; this just wires
+      # the network. Later, when you add /v1/chat/completions etc., you can
+      # keep this URL the same.
+      - OPENAI_API_BASE_URL=http://llm-router:7000/v1
+      - OPENAI_API_KEY=dummy-key
+      # Optional: if you're not using Ollama, disable its integration
+      - ENABLE_OLLAMA_API=false
+    volumes:
+      - open-webui-data:/app/backend/data
+    depends_on:
+      - llm-router
+    restart: unless-stopped
+
+volumes:
+  open-webui-data:
+    driver: local
