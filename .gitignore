@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# VSCode / PyCharm
+.vscode/
+.idea/
+
+# Data (do NOT commit personal Netflix data)
+data/updated_series.csv
+*.csv
