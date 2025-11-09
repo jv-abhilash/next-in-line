@@ -65,41 +65,8 @@ Example queries it handles:
 ## High-Level Architecture
 
 ### System Overview
-```
-┌─────────────┐
-│   User      │
-│  (Browser)  │
-└──────┬──────┘
-       │ HTTPS
-       ▼
-┌─────────────────────────────────────────┐
-│       Open WebUI Container              │
-│  ┌───────────────────────────────────┐  │
-│  │  Chat UI + MCP Tool Integration   │  │
-│  └───────────────────────────────────┘  │
-└──────────────┬──────────────────────────┘
-               │ HTTP/JSON
-               ▼
-┌─────────────────────────────────────────┐
-│     LLM + RAG Container                 │
-│  ┌─────────────────┐  ┌──────────────┐ │
-│  │   LLM Server    │  │ Taste/RAG    │ │
-│  │  (reasoning)    │◄─┤  Module      │ │
-│  └────────┬────────┘  └──────▲───────┘ │
-│           │                   │         │
-└───────────┼───────────────────┼─────────┘
-            │                   │
-            ▼                   │
-    ┌─────────────┐            │
-    │ MCP: TMDb/  │            │
-    │ IMDb Tools  │            │
-    └─────────────┘            │
-                               │
-                    ┌──────────▼────────┐
-                    │  User CSV         │
-                    │ (taste profile)   │
-                    └───────────────────┘
-```
+![High-level architecture](./images_for_readme/system_diagram.png)
+
 
 **Flow:**
 
@@ -134,81 +101,12 @@ This is a **Retrieval-Augmented Generation (RAG)** pattern:
 ## System Design
 
 ### Component Diagram
-```mermaid
-graph TD
-    subgraph User Layer
-        A[User Browser]
-    end
-
-    subgraph Docker Environment
-        subgraph Open WebUI
-            B[Chat UI + MCP Integration]
-        end
-
-        subgraph LLM Container
-            C[LLM Server]
-            D[RAG/Taste Module]
-        end
-    end
-
-    subgraph External Services
-        E[MCP: TMDb/IMDb Tools]
-    end
-
-    subgraph Data
-        F[User CSV<br/>updated_series.csv<br/>updated_film.csv]
-    end
-
-    A <-->|HTTPS| B
-    B <-->|HTTP/JSON| C
-    C -->|tool calls| E
-    E -->|~30 candidates| C
-    C <-->|score candidates| D
-    D -->|load at startup| F
-
-    style D fill:#e1f5ff
-    style F fill:#fff4e1
-```
+![Component Diagram](./images_for_readme/component_diagram)
 
 ---
 
 ### Sequence Diagram
-```mermaid
-sequenceDiagram
-    actor User
-    participant WebUI as Open WebUI
-    participant LLM as LLM Server
-    participant RAG as Taste/RAG Module
-    participant MCP as MCP Tools (TMDb/IMDb)
-    participant CSV as User Taste CSV
-
-    Note over RAG,CSV: Startup: Load CSV → Build taste vector
-    RAG->>CSV: Load updated_series.csv
-    CSV-->>RAG: taste vector built
-
-    User->>WebUI: "Suggest mystery shows like Wednesday"
-    WebUI->>LLM: Forward query + context
-
-    LLM->>LLM: Parse intent:<br/>seed="Wednesday"<br/>genres=["Mystery"]<br/>avoid=["Horror"]
-
-    LLM->>MCP: search("Wednesday")
-    MCP-->>LLM: metadata (type=tv, genres, year)
-
-    LLM->>MCP: discover(type=tv, genres=["Mystery"], limit=30)
-    MCP-->>LLM: 30 candidate titles + metadata
-
-    loop For each candidate
-        LLM->>RAG: score(candidate_metadata)
-        RAG->>RAG: build candidate_vector<br/>compute cosine(user_taste, candidate)
-        RAG-->>LLM: similarity_score
-    end
-
-    LLM->>LLM: Sort by score, pick top 10
-
-    LLM-->>WebUI: Top 10 recommendations + explanation
-    WebUI-->>User: Natural language response
-```
-
+![High-level architecture](./images_for_readme/sequence_diagram.png)
 ---
 
 ## Data Model
