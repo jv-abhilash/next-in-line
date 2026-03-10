@@ -14,3 +14,4 @@ data/updated_series.csv
 
 *.docx
 *.doc
+*_old.md

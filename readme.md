@@ -1,438 +1,436 @@
-# Personal Netflix LLM Recommender (RAG + TMDb/IMDb via MCP)
+# Next In Line
 
-This project is a **personalized movie & series recommender** that combines:
+A **personalized movie & series recommendation system** that combines:
 
-- **Your Netflix viewing history** as a taste profile (genres, cast, directors, preferences)
-- **Live candidate retrieval** from TMDb/IMDb via MCP tools
-- **RAG-style re-ranking** using content-based similarity between your taste and candidates
-- **LLM-powered natural language interface** via Open WebUI
+- **Netflix watch-history CSV** as a personal memory profile
+- **IMDb / TMDb** for live candidate retrieval and metadata enrichment
+- **Prompt-aware query understanding** through an LLM
+- **Weighted ranking** using genres, directors, actors, and long-term memory strength
+- **n8n** as the workflow orchestrator
+- **Open WebUI** as the frontend interface
+- **Qwen 7B** as the default model for prompt parsing and final natural-language generation
 
-**Key Architecture Insight:**
-- **Candidates come from TMDb/IMDb** (not from your CSV)
-- **Your CSV builds a "user taste vector"** for re-ranking those candidates
-- **LLM orchestrates** the flow: query understanding → candidate retrieval → taste-based scoring → explanation
+This version keeps the architecture **simple, modular, and explainable**:
 
-Example queries it handles:
+- **Candidates come from IMDb / TMDb**
+- **Your CSV builds the personal memory layer**
+- **Python services perform filtering and ranking**
+- **n8n orchestrates the workflow**
+- **Qwen 7B interprets the query and writes the final response**
+
+**Important design choice:**
+This version does **not** maintain long-term prompt context in a database yet. Open WebUI handles the immediate interaction, and persistent conversation memory is left as **future work**.
+
+Example queries it can handle:
 
 - "Suggest some light-hearted mystery shows like *Wednesday*, nothing too dark."
 - "Give me movies similar to *Inception* and *Shutter Island*, avoid horror."
-- "Recommend comfort sitcoms based on what I already watch."
+- "Recommend comfort sitcoms based on what I usually watch."
+- "Suggest movies by Nolan, but give me some unexplored options too."
 
 ---
 
 ## Table of Contents
 
-1. [Project Goals](#project-goals)  
+1. [Project Goals](#project-goals)
 2. [High-Level Architecture](#high-level-architecture)
    - [System Overview](#system-overview)
-   - [RAG Flow Explained](#rag-flow-explained)
+   - [Design Principle](#design-principle)
 3. [System Design](#system-design)
    - [Component Diagram](#component-diagram)
    - [Sequence Diagram](#sequence-diagram)
+   - [n8n Workflow Diagram](#n8n-workflow-diagram)
 4. [Data Model](#data-model)
-   - [User Taste CSV](#user-taste-csv)
+   - [How the Dataset Was Built](#how-the-dataset-was-built)
+   - [Netflix CSV as Personal Memory](#netflix-csv-as-personal-memory)
    - [Feature Engineering](#feature-engineering)
-5. [Repository Structure](#repository-structure)
-6. [RAG / Taste Module Design](#rag--taste-module-design)
-   - [Building the User Taste Vector](#building-the-user-taste-vector)
-   - [Scoring Candidates](#scoring-candidates)
-7. [MCP Tools Integration](#mcp-tools-integration)
-8. [LLM Orchestration](#llm-orchestration)
-9. [Setup & Installation](#setup--installation)
-10. [Running the System](#running-the-system)
-11. [Future Work / Roadmap](#future-work--roadmap)
-12. [Privacy Notes](#privacy-notes)
-13. [License](#license)
+5. [Personalization Logic](#personalization-logic)
+   - [Prompt Parsing Logic](#prompt-parsing-logic)
+   - [Personal Memory Strength](#personal-memory-strength)
+   - [Ranking Strategy](#ranking-strategy)
+   - [Stronger Recommendation Boost](#stronger-recommendation-boost)
+6. [Model Choice](#model-choice)
+7. [n8n Orchestration Design](#n8n-orchestration-design)
+8. [Repository Structure](#repository-structure)
+9. [Module Design](#module-design)
+10. [Setup & Installation](#setup--installation)
+11. [Running the System](#running-the-system)
+12. [Future Work / Roadmap](#future-work--roadmap)
+13. [References](#references)
+14. [Privacy Notes](#privacy-notes)
+15. [License](#license)
 
 ---
 
 ## Project Goals
 
-- Build a **fully personal** recommender using your Netflix taste profile
-- Retrieve **fresh candidates** from TMDb/IMDb (not limited to what you've already watched)
-- Use **RAG-style re-ranking**:
-  - Retrieve ~30 candidates from TMDb/IMDb
-  - Score each against your personal taste vector
-  - Return top 10 most similar
-- Power it all with an **LLM** that:
-  - Understands natural language queries
-  - Calls MCP tools to fetch candidates
-  - Uses the taste module to re-rank
-  - Explains recommendations naturally
+- Build a **fully personal** recommender using Netflix watch history as memory
+- Retrieve **fresh recommendation candidates** from IMDb / TMDb
+- Remove already watched titles before ranking
+- Interpret broad and specific prompts differently
+- Use **weighted ranking** based on:
+  - prompt intent
+  - genre match
+  - director match
+  - actor match
+  - personal memory strength
+  - basic quality / exploration signals
+- Orchestrate the full flow through **n8n**
+- Generate final natural-language output through **Open WebUI + Qwen 7B**
 
 ---
 
 ## High-Level Architecture
 
 ### System Overview
-![High-level architecture](./images_for_readme/system_diagram.png)
+
+<img src="images_for_readme/system_diagram.png" alt="System Diagram" width="700">
 
 
 **Flow:**
 
-1. User sends query → **Open WebUI**
-2. Open WebUI → **LLM container** (with prompt + history)
-3. LLM decides to call **MCP tools** (TMDb/IMDb) → retrieves ~30 candidates
-4. LLM passes candidates to **RAG/Taste Module**
-5. Taste Module:
-   - Loads precomputed **user taste vector** (from CSV)
-   - Scores each candidate via **cosine similarity**
-   - Returns scores
-6. LLM sorts by score, picks **top 10**
-7. LLM generates natural language explanation
-8. Open WebUI displays results
+1. User sends prompt through **Open WebUI**
+2. Open WebUI sends the request to **n8n**
+3. n8n calls a **prompt parser** to structure the query
+4. n8n calls **IMDb / TMDb-backed candidate fetcher**
+5. Already watched titles are removed using the personal memory dataset
+6. Remaining candidates are scored by the ranking engine
+7. Strong recommendation boosting is applied using repeated personal patterns
+8. Final ranked results are sent to **Qwen 7B** for natural-language response generation
+9. n8n returns the final answer to Open WebUI
 
 ---
 
-### RAG Flow Explained
+### Design Principle
 
-This is a **Retrieval-Augmented Generation (RAG)** pattern:
+This project follows one main rule:
 
-1. **Retrieval Phase**: External knowledge source (TMDb/IMDb) via MCP tools
-2. **Augmentation Phase**: Re-rank using personal taste index (your CSV)
-3. **Generation Phase**: LLM explains the top results
+> **External APIs provide the candidate pool. Personal memory personalizes the ranking.**
 
-**Key Insight:**
-- Your CSV doesn't provide the candidates
-- Your CSV provides the **preference lens** through which candidates are filtered
+That means:
+
+- **IMDb / TMDb** answer: *What is available?*
+- **Netflix CSV** answers: *What do I usually like?*
+- **Prompt parser** answers: *What do I want right now?*
+- **Ranking engine** answers: *Which candidates best satisfy both?*
 
 ---
 
 ## System Design
 
 ### Component Diagram
-![Component Diagram](./images_for_readme/component_diagram.png)
+
+<img src="images_for_readme/component_diagram.png" alt="Component Diagram" width="700">
 
 ---
 
 ### Sequence Diagram
-![High-level architecture](./images_for_readme/sequence_diagram.png)
+
+<img src="images_for_readme/sequence_diagram.png" alt="Sequence Diagram" width="700">
+
+---
+
+### n8n Workflow Diagram
+
+<img src="images_for_readme/n8n_workflow_diagram.png" alt="System Diagram" height="700">
+
 ---
 
 ## Data Model
 
-### User Taste CSV
+### How the Dataset Was Built
 
-You maintain two CSV files (personal Netflix history):
+The personal dataset was built from **Netflix viewing history** downloaded per profile. In simple terms:
 
-- `data/updated_film.csv` (movies you've watched)
-- `data/updated_series.csv` (series you've watched)
+1. Download watch history from Netflix
+2. Remove the profile name field
+3. Keep title names and ratings / thumbs feedback
+4. Remove duplicates
+5. Use **IMDb / TMDb** metadata to enrich each title with:
+   - type (movie / series)
+   - genre
+   - director
+   - main actors
+6. Split the final data into **movies** and **series**
+7. Normalize preference strength using ratings / weights
 
-**Purpose:** These files are **NOT** the source of recommendations. They are used **only** to build your taste profile.
+This produces a structured and mostly frozen personal memory dataset.
 
-**Common columns:**
+---
+
+### Netflix CSV as Personal Memory
+
+You maintain enriched Netflix watch-history datasets such as:
+
+- `data/film.csv`
+- `data/series.csv`
+
+These files are **not** the source of recommendation candidates.
+They are used to build a **personal memory profile**.
+
+**Purpose of the CSV:**
+
+- titles already watched
+- normalized rating / preference signals
+- repeated genre patterns
+- repeated director patterns
+- repeated actor patterns
+- movie vs series preference
+
+**Typical columns:**
 
 | Column | Description |
 |--------|-------------|
-| `Profile Name` | Netflix profile (can be filtered/ignored) |
-| `Title Name` | Title as shown in Netflix |
-| `Thumbs Value` | Like/dislike feedback (-1, 0, 1) |
-| `Weightage` | Manual importance weight (0-5) |
+| `Title Name` | Title name from Netflix export |
+| `Thumbs Value` | Like / neutral / dislike feedback |
+| `Weightage` | Manual or normalized importance |
 | `Genre` | Comma-separated genres |
 | `Director` | Director name(s) |
 | `Actors` | Comma-separated main cast |
+| `Type` | Movie or Series |
 
 ---
 
 ### Feature Engineering
 
-At startup, the RAG/Taste Module:
+At preparation time, the system:
 
-1. **Loads** both CSVs
-2. **Normalizes** fields:
-   - `normalized_genres` → lowercase, standardized
-   - `normalized_actors` → tokenized names
-   - `normalized_director` → cleaned
-3. **Builds** a `content_text` per title:
-```python
-   content_text = f"{genres} {actors} {director}"
-```
-4. **Weights** each title by `Thumbs Value × Weightage`
-5. **Computes** a single **user taste vector**:
-```python
-   user_taste = weighted_average(all_content_vectors, weights)
+1. Loads your movies and series CSV files
+2. Removes duplicates
+3. Standardizes genres, actors, and directors
+4. Builds weighted memory signals from ratings and frequency
+5. Creates a personal memory profile such as:
+
+```text
+Christopher Nolan -> 0.92
+David Lynch       -> 0.71
+Sci-Fi            -> 0.88
+Thriller          -> 0.84
+Actor X           -> 0.76
+Movies            -> 0.81
+Series            -> 0.63
 ```
 
-This vector represents your aggregated preferences across genres, actors, and directors.
+This memory profile becomes the personalization layer used during ranking.
+
+---
+
+## Personalization Logic
+
+### Prompt Parsing Logic
+
+The first step is understanding the prompt.
+
+The system checks whether the user explicitly asks for:
+
+- a **director**
+- a **genre**
+- an **actor**
+- a **seed title**
+- a **content type** (movie / series)
+- an **exclusion** (for example: avoid horror)
+
+**Example:**
+
+Input:
+
+```text
+Recommend mystery series, not too dark
+```
+
+Parsed intent:
+
+```json
+{
+  "query_type": "specific",
+  "requested_director": null,
+  "requested_genres": ["mystery"],
+  "requested_actors": [],
+  "seed_title": null,
+  "exclude_genres": ["horror"],
+  "type": "series"
+}
+```
+
+**Rule:**
+
+- If the prompt is **specific**, prioritize the requested signal.
+- If the prompt is **broad**, use a hybrid scoring approach across all major signals.
+
+---
+
+### Personal Memory Strength
+
+The personal memory layer does not just check whether something matches.
+It checks **how strongly it matches long-term taste**.
+
+For example, if the watch history shows many highly weighted Nolan titles, then:
+
+- Nolan-based recommendations get a stronger boost
+- similar genres may also get reinforcement
+- related actors/directors can gain partial support
+
+This converts the project from a simple metadata matcher into a stronger personalized recommender.
+
+---
+
+### Ranking Strategy
+
+After candidates are fetched from IMDb / TMDb and watched titles are removed, the ranking engine scores the rest.
+
+#### If the prompt is specific
+
+```text
+Final Score =
+0.45 * Prompt Match
++ 0.35 * Personal Memory Match
++ 0.15 * Candidate Quality
++ 0.05 * Exploration
+```
+
+#### If the prompt is broad
+
+```text
+Final Score =
+0.25 * Prompt Match
++ 0.50 * Personal Memory Match
++ 0.20 * Candidate Quality
++ 0.05 * Exploration
+```
+
+#### Personal Memory Match
+
+```text
+Personal Memory Match =
+0.40 * Director Memory Strength
++ 0.30 * Genre Memory Strength
++ 0.20 * Actor Memory Strength
++ 0.10 * Type Preference
+```
+
+---
+
+### Stronger Recommendation Boost
+
+A final boosting layer strengthens candidates that align closely with repeated long-term patterns.
+
+**Example:**
+
+If the memory profile strongly favors Nolan, sci-fi, and thriller, then a new candidate with those features will get an additional recommendation boost.
+
+This makes the output more aligned with actual user taste instead of only prompt-level matching.
+
+---
+
+## Model Choice
+
+This project keeps **Qwen 7B** as the default model because it was already part of the earlier version of the system.
+
+### Why keep Qwen 7B here
+
+- it matches the previous project setup
+- it avoids changing too many variables while rectifying the workflow
+- it is sufficient for:
+  - prompt parsing
+  - intent extraction
+  - final natural-language recommendation writing
+
+### Could Llama be used instead?
+
+Yes. A small **Llama** model can also be used if deployment is easier in your environment.
+
+### Current recommendation
+
+For this project version:
+
+- **Keep Qwen 7B** if you already have it working
+- switch to **Llama** only if your local setup, tooling, or inference flow is easier with Llama
+
+That keeps the project stable while you refine the pipeline.
+
+---
+
+## n8n Orchestration Design
+
+In this project, **n8n is the workflow orchestrator**.
+
+It is responsible for:
+
+- receiving the request from Open WebUI
+- calling the prompt parser
+- calling the candidate retrieval service
+- calling the watched filter
+- calling the ranking engine
+- applying fallback logic if needed
+- calling the final response generator
+- returning the result to the frontend
+
+n8n is **not** used to implement the actual ranking formula. That logic stays in Python services.
+
+### Suggested APIs behind n8n
+
+- `POST /parse-query`
+- `POST /fetch-candidates`
+- `POST /filter-watched`
+- `POST /rank-candidates`
+- `POST /fallback-candidates`
+- `POST /generate-response`
 
 ---
 
 ## Repository Structure
-```
-netflix-llm-recommender/
+
+```text
+next-in-line/
+├── .venv/
+├── app/
 ├── data/
-│   ├── updated_film.csv           # Personal movie history
-│   ├── updated_series.csv         # Personal series history
-│   └── .gitignore                 # Don't commit personal data!
+│   ├── film.csv
+│   └── series.csv
 ├── docker/
-│   ├── docker-compose.yml         # Open WebUI + LLM + RAG setup
-│   └── Dockerfile.rag             # Optional: separate RAG service
+│   ├── .cache/
+│   ├── .env
+│   ├── build.sh
+│   ├── docker-compose.yml
+│   ├── dockerfile
+│   ├── entrypoint.sh
+│   ├── README.md
+│   ├── requirements.txt
+│   └── server.py
+├── images_for_readme/
 ├── src/
-│   ├── __init__.py
-│   ├── config.py                  # Paths, API keys
-│   ├── taste_module.py            # Core RAG logic
-│   │   ├── load_csv()
-│   │   ├── build_taste_vector()
-│   │   └── score_candidate()
-│   ├── mcp_client.py              # MCP tool definitions (optional)
-│   └── api.py                     # Optional: FastAPI wrapper for taste module
-├── notebooks/
-│   └── 01_taste_vector_test.ipynb # Test taste vector building
+├── readme.md
 ├── requirements.txt
-└── README.md
-```
-
-**Key files:**
-
-- **`taste_module.py`**: Implements the RAG/taste logic
-- **`docker-compose.yml`**: Orchestrates Open WebUI + LLM + taste module
-- **`updated_series.csv` / `updated_film.csv`**: Your personal data (add to `.gitignore`)
-
----
-
-## RAG / Taste Module Design
-
-### Building the User Taste Vector
-
-**Goal:** Create a single vector that represents your aggregate preferences.
-
-**Steps:**
-
-1. **Load CSVs:**
-```python
-   df_series = pd.read_csv("data/updated_series.csv")
-   df_films = pd.read_csv("data/updated_film.csv")
-   df_all = pd.concat([df_series, df_films])
-```
-
-2. **Normalize features:**
-```python
-   df_all['content_text'] = (
-       df_all['Genre'].str.lower() + " " +
-       df_all['Actors'].str.lower().str.replace(",", " ") + " " +
-       df_all['Director'].str.lower()
-   )
-```
-
-3. **Build TF-IDF matrix:**
-```python
-   from sklearn.feature_extraction.text import TfidfVectorizer
-   
-   vectorizer = TfidfVectorizer(max_features=500)
-   content_matrix = vectorizer.fit_transform(df_all['content_text'])
-```
-
-4. **Compute weights:**
-```python
-   # Thumbs: -1 (dislike), 0 (neutral), 1 (like)
-   # Weightage: 1-5 (importance)
-   df_all['weight'] = (
-       (df_all['Thumbs Value'] + 1) *  # Scale to [0, 2]
-       df_all['Weightage']              # User importance
-   )
-   weights = df_all['weight'].values
-```
-
-5. **Aggregate into user taste vector:**
-```python
-   user_taste_vector = (
-       (content_matrix.T @ weights) / weights.sum()
-   )
-   # Result: sparse vector of shape (num_features,)
-```
-
-**Store:**
-- `vectorizer` (for transforming new candidates)
-- `user_taste_vector` (for similarity scoring)
-
----
-
-### Scoring Candidates
-
-When the LLM retrieves candidates from TMDb/IMDb:
-
-1. **Extract metadata:**
-```python
-   candidate = {
-       "title": "Locke & Key",
-       "genres": ["Drama", "Fantasy", "Mystery"],
-       "cast": ["Connor Jessup", "Emilia Jones"],
-       "director": "Various"
-   }
-```
-
-2. **Build candidate content text:**
-```python
-   candidate_text = (
-       " ".join(candidate['genres']).lower() + " " +
-       " ".join(candidate['cast']).lower() + " " +
-       candidate['director'].lower()
-   )
-```
-
-3. **Transform using same vectorizer:**
-```python
-   candidate_vector = vectorizer.transform([candidate_text])
-```
-
-4. **Compute cosine similarity:**
-```python
-   from sklearn.metrics.pairwise import cosine_similarity
-   
-   score = cosine_similarity(user_taste_vector, candidate_vector)[0][0]
-```
-
-5. **Return score** to LLM for ranking.
-
-**Example API:**
-```python
-def score_candidate(candidate_metadata: dict) -> float:
-    """
-    Returns similarity score (0-1) between user taste and candidate.
-    """
-    candidate_text = build_content_text(candidate_metadata)
-    candidate_vector = vectorizer.transform([candidate_text])
-    score = cosine_similarity(user_taste_vector, candidate_vector)[0][0]
-    return float(score)
+└── next_in_line_project_note.docx
 ```
 
 ---
 
-## MCP Tools Integration
+## Module Design
 
-**MCP (Model Context Protocol)** tools expose TMDb/IMDb to the LLM.
+### 1. CSV Preparation Module
+Builds the clean personal memory dataset from Netflix watch history.
 
-**Required MCP tools:**
+### 2. Prompt Parser Module
+Converts natural-language queries into structured intent.
 
-1. **`search_title(query, type_hint)`**
-   - Search for a specific title
-   - Returns: `tmdb_id`, `media_type`, `title`, `year`, `genres`
+### 3. Candidate Fetcher Module
+Fetches external recommendation candidates from IMDb / TMDb.
 
-2. **`discover_titles(filters)`**
-   - Discover titles matching criteria
-   - Filters: `genres`, `year_range`, `type`, `popularity`
-   - Returns: list of ~30 candidates with metadata
+### 4. Watched Filter Module
+Removes already watched titles using personal memory.
 
-**Example tool definition (pseudo-code):**
-```python
-# MCP tool: tmdb_discover
-def tmdb_discover(
-    genres: List[str],
-    type: str = "tv",
-    year_min: int = 2000,
-    year_max: int = 2025,
-    limit: int = 30
-) -> List[dict]:
-    """
-    Discover titles from TMDb matching criteria.
-    Returns list of candidates with metadata.
-    """
-    # Call TMDb API
-    results = tmdb_api.discover(
-        with_genres=genres,
-        media_type=type,
-        year_gte=year_min,
-        year_lte=year_max,
-        limit=limit
-    )
-    
-    # Return structured metadata
-    return [
-        {
-            "title": r['title'],
-            "tmdb_id": r['id'],
-            "genres": r['genre_names'],
-            "cast": fetch_cast(r['id']),
-            "year": r['release_year']
-        }
-        for r in results
-    ]
-```
+### 5. Ranking Engine Module
+Scores candidates using prompt intent, memory strength, quality, and exploration.
 
-**Open WebUI Configuration:**
+### 6. Stronger Recommendation Booster
+Applies an additional boost to items strongly aligned with repeated patterns.
 
-Add MCP server connection in Open WebUI settings pointing to your TMDb MCP service.
+### 7. Response Generator Module
+Packages final ranked items for natural-language response creation.
 
----
-
-## LLM Orchestration
-
-The LLM acts as the orchestrator:
-
-### System Prompt (Example)
-```
-You are a personalized movie and TV recommendation assistant.
-
-Your workflow:
-1. Parse the user's request to extract:
-   - Seed titles (if any)
-   - Preferred genres
-   - Avoided genres
-   - Mood/tone preferences
-   - Type (movie/tv)
-
-2. Use MCP tools to retrieve ~30 candidates from TMDb/IMDb:
-   - If seed title provided: use search_title() then discover_similar()
-   - Otherwise: use discover_titles() with genre filters
-
-3. For each candidate, call the taste_score() tool to get a similarity score 
-   against the user's personal taste profile (0-1).
-
-4. Sort candidates by score, pick top 10.
-
-5. Generate a natural language explanation of the recommendations, highlighting:
-   - Why each fits the user's request
-   - How it matches their taste profile
-   - Cast/genre/director connections to titles they've enjoyed
-
-DO NOT compute similarity yourself. Always use the taste_score() tool.
-```
-
----
-
-### Example Conversation Flow
-
-**User:**
-> "Suggest mystery shows like Wednesday, nothing too dark"
-
-**LLM thinks:**
-```
-- seed: "Wednesday"
-- genres: ["Mystery"]
-- avoid_genres: ["Horror"]
-- mood: "light"
-- type: "tv"
-```
-
-**LLM actions:**
-
-1. **Call MCP:** `search_title("Wednesday", type="tv")`
-   - Returns: Wednesday metadata (genres: Mystery, Comedy, Fantasy)
-
-2. **Call MCP:** `discover_titles(genres=["Mystery", "Comedy"], type="tv", limit=30)`
-   - Returns: 30 candidate shows
-
-3. **For each candidate:**
-```
-   Call taste_score(candidate_metadata)
-   → Returns score (e.g., 0.87)
-```
-
-4. **Sort by score, pick top 10**
-
-5. **Generate response:**
-
-> Based on your taste profile, here are 10 mystery shows similar to Wednesday with a lighter tone:
->
-> 1. **Locke & Key** (Score: 0.87)
->    - Fantasy mystery with family-friendly tone
->    - Shares the supernatural mystery element you enjoyed in Wednesday
->    - Strong match with your preference for Connor Jessup's acting style
->
-> 2. **Nancy Drew** (Score: 0.84)
->    - Teen mystery series, lighter than typical horror
->    - Matches your interest in young adult mysteries
->    - ...
+### 8. n8n Workflow Layer
+Connects all modules into a single visible pipeline.
 
 ---
 
@@ -440,16 +438,22 @@ DO NOT compute similarity yourself. Always use the taste_score() tool.
 
 ### Prerequisites
 
-- Docker & Docker Compose
-- TMDb API key ([get one here](https://www.themoviedb.org/settings/api))
-- Your personal Netflix CSV files
+- Docker and Docker Compose
+- Python 3.10+
+- TMDb API key
+- IMDb access method or adapter service
+- Open WebUI
+- n8n
+- Local LLM runtime
+- Personal Netflix CSV files
 
 ---
 
 ### 1. Clone Repository
+
 ```bash
-git clone https://github.com/<your-username>/netflix-llm-recommender.git
-cd netflix-llm-recommender
+git clone https://github.com/jv-abhilash/next-in-line.git
+cd next-in-line
 ```
 
 ---
@@ -457,51 +461,44 @@ cd netflix-llm-recommender
 ### 2. Prepare Your Data
 
 Place your CSV files in the `data/` directory:
-```bash
+
+```text
 data/
-├── updated_film.csv
-├── updated_series.csv
-└── .gitignore  # Make sure CSVs are ignored!
+├── film.csv
+├── series.csv
+└── .gitignore
 ```
 
-**Important:** Add to `.gitignore`:
-```
-data/updated_*.csv
-data/*_personal.csv
-```
+**Important:** add the real personal files to `.gitignore`.
 
 ---
 
 ### 3. Configure Environment
 
-Create `.env` file:
+Create a `.env` file:
+
 ```bash
-# TMDb API
-TMDB_API_KEY=your_tmdb_api_key_here
-
-# Paths
-USER_CSV_SERIES=./data/updated_series.csv
-USER_CSV_FILMS=./data/updated_film.csv
-
-# LLM Configuration
-LLM_MODEL=llama3.2:latest
+TMDB_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxx
+IMDB_ADAPTER_URL=http://localhost:8010
+LLM_MODEL=qwen2.5:7b
 LLM_API_URL=http://ollama:11434
+OPENWEBUI_URL=http://localhost:3000
+N8N_WEBHOOK_URL=http://localhost:5678/webhook/recommend
 ```
 
 ---
 
 ### 4. Install Python Dependencies
 
-If running taste module locally:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-
 pip install -r requirements.txt
 ```
 
-**`requirements.txt`:**
-```
+**`requirements.txt`**
+
+```text
 pandas>=2.0.0
 numpy>=1.24.0
 scikit-learn>=1.3.0
@@ -515,46 +512,42 @@ requests>=2.31.0
 
 ### 5. Docker Setup
 
-**`docker-compose.yml`** (example):
+Example `docker-compose.yml`:
+
 ```yaml
 version: '3.8'
 
 services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    ports:
+      - "5678:5678"
+    environment:
+      - TZ=Asia/Kolkata
+    volumes:
+      - ~/.n8n:/home/node/.n8n
+
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     ports:
       - "3000:8080"
-    environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
-      - WEBUI_SECRET_KEY=your-secret-key
-    volumes:
-      - open-webui-data:/app/backend/data
     depends_on:
+      - n8n
       - ollama
-      - taste-module
 
   ollama:
     image: ollama/ollama:latest
     ports:
       - "11434:11434"
-    volumes:
-      - ollama-data:/root/.ollama
 
-  taste-module:
+  recommender-api:
     build:
       context: .
-      dockerfile: docker/Dockerfile.rag
+      dockerfile: docker/Dockerfile.api
     ports:
       - "8001:8001"
-    environment:
-      - USER_CSV_SERIES=/data/updated_series.csv
-      - USER_CSV_FILMS=/data/updated_film.csv
     volumes:
       - ./data:/data:ro
-
-volumes:
-  open-webui-data:
-  ollama-data:
 ```
 
 ---
@@ -562,145 +555,81 @@ volumes:
 ## Running the System
 
 ### 1. Start Docker Services
+
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
-**Services:**
-- Open WebUI: http://localhost:3000
-- Ollama: http://localhost:11434
-- Taste Module API: http://localhost:8001
+### 2. Pull the Model
 
----
-
-### 2. Pull LLM Model
 ```bash
-docker exec -it netflix-llm-recommender-ollama-1 ollama pull llama3.2
+docker exec -it <ollama-container-name> ollama pull qwen2.5:7b
 ```
 
----
+### 3. Import the n8n Workflow
 
-### 3. Configure MCP Tools in Open WebUI
+1. Open n8n at `http://localhost:5678`
+2. Import `workflows/n8n_main_workflow.json`
+3. Configure API endpoints and credentials
+4. Activate the workflow
 
-1. Open Open WebUI at http://localhost:3000
-2. Go to **Settings** → **Tools** → **MCP Servers**
-3. Add TMDb MCP server configuration
-4. Add taste module endpoint: `http://taste-module:8001/score`
+### 4. Use Through Open WebUI
 
----
+Open `http://localhost:3000` and try:
 
-### 4. Test the Taste Module
-```bash
-curl http://localhost:8001/healthz
+> "Recommend mystery series similar to Wednesday but lighter in tone"
 
-curl -X POST http://localhost:8001/score \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Stranger Things",
-    "genres": ["Drama", "Fantasy", "Horror"],
-    "cast": ["Winona Ryder", "David Harbour"],
-    "director": "The Duffer Brothers"
-  }'
+The flow will:
 
-# Response: {"score": 0.847}
-```
-
----
-
-### 5. Chat with the Recommender
-
-Open http://localhost:3000 and try:
-
-> "Recommend mystery shows similar to Wednesday but lighter in tone"
-
-The LLM will:
-1. Call TMDb MCP tools
-2. Get ~30 candidates
-3. Score each via taste module
-4. Return top 10 with explanations
+1. send the request to n8n
+2. parse the prompt
+3. fetch candidate titles
+4. remove watched titles
+5. rank results based on personal memory
+6. generate the final natural-language output
 
 ---
 
 ## Future Work / Roadmap
 
-- [ ] Implement hybrid scoring (taste vector + popularity + recency)
-- [ ] Add diversity/serendipity factor to avoid filter bubble
-- [ ] Support multi-profile households (switch between taste profiles)
-- [ ] Cache TMDb metadata locally to reduce API calls
-- [ ] Add explicit feedback mechanism (thumbs up/down on recommendations)
-- [ ] Build web UI visualization of taste vector (genre radar chart)
-- [ ] Support actor/director deep-dive queries ("more from Guillermo del Toro")
-- [ ] Implement "mood-based" taste vectors (separate profiles for different moods)
+- move structured personal memory into **SQL** if the dataset becomes larger or more dynamic
+- add **RAG / vector storage** for semantic retrieval and vibe-based recommendations
+- add **context-based prompting** using saved conversation history or prompt memory
+- persistent database for conversation and recommendation history
+- user feedback loop with thumbs up/down updates
+- local metadata cache to reduce repeated API calls
+- multi-user support
+- poster, trailer, and streaming availability enrichment
+- recommendation quality metrics and evaluation dashboard
 
 ---
 
-## Privacy Notes
+## References
 
-**This project uses your personal Netflix viewing history.**
+- [n8n Docker Installation](https://docs.n8n.io/hosting/installation/docker/)
+- [n8n Docker Compose Guide](https://docs.n8n.io/hosting/installation/server-setups/docker-compose/)
+- [Docker Engine Installation](https://docs.docker.com/engine/install/)
+- [Open WebUI Quick Start](https://docs.openwebui.com/getting-started/quick-start/)
+- [TMDb API Getting Started](https://developer.themoviedb.org/docs/getting-started)
+- [TMDb Discover Movie API](https://developer.themoviedb.org/reference/discover-movie)
+- [IMDb Developer Documentation](https://developer.imdb.com/documentation/)
+- [IMDb API Overview](https://developer.imdb.com/documentation/api-documentation/)
+- [Netflix Viewing History Help](https://help.netflix.com/en/node/101917)
+- [Qwen 2.5 7B Instruct](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct)
 
-⚠️ **Do NOT commit raw data to public repositories**
-
-**Best practices:**
-
-1. **Add to `.gitignore`:**
-```
-   data/updated_*.csv
-   data/*_personal.csv
-   *.csv
-```
-
-2. **Use sample/anonymized data in repo:**
-   - Provide a `data/sample_series.csv` with fake titles
-   - Document the expected schema
-
-3. **Keep personal data local:**
-   - Mount real CSVs via Docker volumes (read-only)
-   - Never copy to container layers
-
-4. **Alternative: Encrypt your data:**
-```bash
-   # Encrypt before committing (if absolutely necessary)
-   gpg --symmetric --cipher-algo AES256 data/updated_series.csv
-```
+**Dataset note:**
+The personal dataset in this project was built from **Netflix profile viewing history**, then cleaned, deduplicated, and enriched with IMDb / TMDb metadata.
 
 ---
 
-## License
+## Final Note
 
-MIT License
-```
-Copyright (c) 2025 [Your Name]
+This version focuses on a **clean and modular architecture**:
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+- structured prompt parsing
+- external candidate retrieval
+- personal memory-driven ranking
+- n8n workflow orchestration
+- natural-language frontend interaction
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
----
-
-## Additional Resources
-
-- [TMDb API Documentation](https://developers.themoviedb.org/3)
-- [Open WebUI Documentation](https://docs.openwebui.com)
-- [MCP Protocol Specification](https://modelcontextprotocol.io)
-- [Scikit-learn TF-IDF Guide](https://scikit-learn.org/stable/modules/feature_extraction.html#tfidf-term-weighting)
-
----
-
-**Questions or Issues?**
-
-Open an issue on GitHub or contribute improvements via pull request!
+Conversation-level long-term context storage is intentionally kept as **future work** so the core recommendation flow stays simple, correct, and easy to extend later.
