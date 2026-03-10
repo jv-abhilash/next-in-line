@@ -101,7 +101,7 @@ This is a **Retrieval-Augmented Generation (RAG)** pattern:
 ## System Design
 
 ### Component Diagram
-![Component Diagram](./images_for_readme/component_diagram)
+![Component Diagram](./images_for_readme/component_diagram.png)
 
 ---
 
